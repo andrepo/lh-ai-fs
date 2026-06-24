@@ -21,3 +21,6 @@ dist/
 
 # Plans
 docs/plans/
+
+# Local internal notes
+.internal/
