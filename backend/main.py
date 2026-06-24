@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
+from agents import extractor_agent, legal_verifier_agent
 
 app = FastAPI()
 
@@ -26,5 +27,11 @@ def load_documents() -> dict[str, str]:
 @app.post("/analyze")
 async def analyze():
     documents = load_documents()
-    # TODO: Build your multi-agent pipeline here
-    return {"report": None}
+    msj_text = documents.get("motion_for_summary_judgment", "")
+    
+    # Run the core multi-agent pipeline
+    extracted_items = extractor_agent(msj_text)
+    verified_items = legal_verifier_agent(extracted_items)
+    
+    return {"report": verified_items}
+

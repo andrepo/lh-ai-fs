@@ -11,11 +11,14 @@ def call_llm(
     messages: list[dict],
     model: str = "gpt-4o",
     temperature: float = 0,
+    response_format: dict = None,
 ) -> str:
     """Call the OpenAI API and return the response content."""
     response = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
+        response_format=response_format,
     )
     return response.choices[0].message.content
+
