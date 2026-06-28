@@ -1,17 +1,5 @@
 # Production Readiness Plan
 
-After the prototype, write a serious production readiness plan for taking BS Detector to an MVP production system. Put it in docs/production-readiness.md or an equivalent document.
-
-This should be treated as a standalone system design challenge. We are not asking for a generic "how to scale an app" essay. We are asking how this AI legal verification product should move from a local prototype to a production MVP for real legal users.
-
-Assume the product will eventually need to handle confidential customer documents, long-running AI workflows, multiple users and organizations, quality-sensitive outputs, and growth beyond a single local process. You decide the rest of the assumptions. State them clearly.
-
-Your plan should explain the architecture you would choose, the tradeoffs behind it, and how you would sequence the work. It should be concrete enough to defend in an interview, but it does not need to be exhaustive. We care more about your reasoning than whether you name a specific cloud service or framework.
-
-We do not expect you to build this production system during the take-home. We do expect you to show how you think about turning a prototype into a product: where state lives, how work moves through the system, what can fail, what needs to be measured, what must be secure, and what you would build first.
-
-Avoid boilerplate architecture. A strong answer makes opinionated choices, explains why they fit the product, and calls out what you are intentionally not solving yet.
-
 ## Scenario
 
 Assume BS Detector is moving from a prototype to a paid MVP for law firms and legal teams.
@@ -29,9 +17,28 @@ Assume BS Detector is moving from a prototype to a paid MVP for law firms and le
 
 ## Architecture
 
-[Insert Architecture Diagram]
-
 I opted for AWS as the cloud provider due to its maturity, broad service offering, and familiarity to many developers and also for supporting all of the cloud services I need for this MVP.
+
+```text
+[User Browser] ------( Direct Upload / Presigned URL )-------> [ S3 Private Buckets ]
+      |                                                             ^
+      |                                                             |
+      v                                                             | (Read/Write Docs)
+[ FastAPI Web Server ]                                              |
+      |                                                             |
+      +-----( SQL + RLS )------------> [ PostgreSQL + pgvector ]    |
+      |                                      ^                      |
+      |                                      | (Vector Search)      |
+      +-----( Enqueue Job )---------> [ AWS SQS Queue ]             |
+                                             |                      |
+                                             | (Poll Jobs)          |
+                                             v                      |
+                                     [ ECS Worker Tasks ] ----------+
+                                             |                      
+                                             +---( Cache )----------> [ Redis Cache ]
+                                             |
+                                             +---( Model Calls )----> [ OpenAI API / LLM ]
+```
 
 ### Storage
 
@@ -47,6 +54,16 @@ We evaluated AWS Bedrock Knowledge Bases to offload RAG orchestration. However, 
 
 I would choose a custom chunking pipeline on ECS/Cloud Run workers, storing embeddings in Postgres pgvector / Pinecone Serverless, keeping fixed costs near zero.
 
+### Multi-Tenant Data Isolation
+
+To prevent any data leakage between different law firms, we isolate tenant data at three boundaries:
+
+1. Document Storage (S3): Files are stored using tenant-prefixed paths (e.g., `s3://tenant-{org_id}/matter-{matter_id}/...`).
+
+2. Database Security (PostgreSQL RLS): We use PostgreSQL Row-Level Security (RLS). Every table (matters, jobs, reports, chunks) contains an `org_id` column. PostgreSQL automatically filters all select/update/delete operations to match the authenticated user's `org_id`.
+
+3. Agent/Vector Isolation: When workers query the vector database for RAG, the query is strictly scoped using metadata filters: `{ "org_id": current_org_id, "matter_id": current_matter_id }`.
+
 ### Queue (handling concurrent users)
 
 AWS SQS (Simple Queue Service) for queueing jobs (OCR tasks, analysis tasks).
@@ -60,16 +77,23 @@ For scalability, I suggest a creating a new Docker image for the worker.py and d
 Now that I decided to include OCR in the pipeline and that we are dealing with potentially hundreds of large documents, I would implement the following orchestration strategy and include RAG:
 
 1 - OCR: PDF/Images to text
+
 2 - Embeddings + Chunking: Chunk the extracted text and index it
+
 3 - Extraction: Run the extractor_agent gainst the submitted MSJ to extract all citations
+
 4 - RAG + Verification: to avoind running into issues with the LLM context size, we use RAG to retrieve only the relevant passages (evidence) for each assertion
+
 5 - Synthesis: Merges the findings into the final report
 
 ### Caching Strategy
 
 To optimize latency and keep LLM/infra costs low, I would implement caching at three levels:
-1 - OCR / Text Cache: Compute a SHA-256 hash of every uploaded file. If the file hash exists, skip OCR and load the text from S3 immediately.
+
+1 - OCR / Text Cache: Compute a SHA-256 hash of every uploaded file. If the file hash exists, skip OCR and load the text from S3.
+
 2 - LLM Prompt Caching: Structuring our agent prompts to take advantage of LLM provider-level prompt caching, reducing input token costs for large documents.
+
 3 - Report Caching: Cache final compiled reports in Redis to ensure instant frontend rendering on reload.
 
 ### Security & Privacy
@@ -77,6 +101,7 @@ To optimize latency and keep LLM/infra costs low, I would implement caching at t
 I would implement the following security measures:
 
 1 - Transparent Storage Encryption: Encrypt S3 buckets and RDS PostgreSQL databases at rest using cloud-managed encryption (SSE-S3 and AWS RDS Storage Encryption).
+
 2 - Access control: Implement strict access control using RBAC.
 
 ## User Flow & State Tracking
@@ -94,3 +119,21 @@ Here's the proposed UI and data flow:
         - Progress bar (based on completed steps)
         - Last updated timestamp
     - The user can click on the job to view the report when it's done
+
+## Roadmap
+
+1 - Multi-tenant: 
+Given this is critical and sensitive change, I would implement this first.
+
+2 - Core Async / Queue / UX: 
+Build the SQS queue and the backend worker (worker.py) running our existing agent prototype. Keep using digital PDFs and full-text context first to ensure the async flow works.
+This includes the UX changes mentioned above, to allow users to track their jobs.
+
+3 - Hardening: 
+Implement full database/S3 encryption-at-rest keys, Postgres RLS policies, and team permissions.
+
+4 - RAG & OCR: 
+Integrate AWS Textract/Document AI for scanned PDFs and implement pgvector/RAG search so the agents can handle larger matters.
+
+5 - AIKIDO / Audit: 
+I would run and address vulnerabilities in the system before deploying to production. 
